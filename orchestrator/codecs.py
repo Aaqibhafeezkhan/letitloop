@@ -90,7 +90,9 @@ class DurableCodecRegistry:
 
         val_id = id(val)
         if val_id in _visited:
-            raise DurableCodecError(f"Circular reference detected while serializing object of type '{type(val).__name__}'.")
+            raise DurableCodecError(
+                f"Circular reference detected while serializing object of type '{type(val).__name__}'."
+            )
 
         # Registered custom codec (exact type or subclass)
         for cls, codec in self._type_to_codec.items():
@@ -146,7 +148,9 @@ class DurableCodecRegistry:
                 raw_v = val["v"]
                 if tag == "tuple":
                     if not isinstance(raw_v, (list, tuple)):
-                        raise DurableCodecError(f"Corrupted tuple payload: expected iterable, got {type(raw_v).__name__}")
+                        raise DurableCodecError(
+                            f"Corrupted tuple payload: expected iterable, got {type(raw_v).__name__}"
+                        )
                     try:
                         return tuple(self.decode(x, _depth=_depth + 1) for x in raw_v)
                     except DurableCodecError:
