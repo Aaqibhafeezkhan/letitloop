@@ -149,3 +149,55 @@ def test_unsupported_type_fail_closed():
 
     with pytest.raises(DurableCodecError):
         encode_step_result(CustomNonSerializable())
+
+
+def test_circular_reference_fail_closed():
+    """Verify that circular references in lists, dicts, and tuples fail closed with DurableCodecError."""
+    # Circular list
+    circular_list = [1, 2]
+    circular_list.append(circular_list)
+    with pytest.raises(DurableCodecError, match="Circular reference detected"):
+        encode_step_result(circular_list)
+
+    # Circular dict
+    circular_dict = {"a": 1}
+    circular_dict["self"] = circular_dict
+    with pytest.raises(DurableCodecError, match="Circular reference detected"):
+        encode_step_result(circular_dict)
+
+
+def test_malformed_tagged_payloads_fail_closed():
+    """Verify that corrupted tagged payloads in decode fail closed with DurableCodecError."""
+    reg = DurableCodecRegistry()
+
+    # Malformed tuple: raw 'v' is an integer instead of iterable
+    with pytest.raises(DurableCodecError, match="Corrupted tuple payload"):
+        reg.decode({"__lil_type__": "tuple", "v": 12345})
+
+    # Malformed datetime: invalid isoformat string
+    with pytest.raises(DurableCodecError, match="Failed to hydrate tagged 'datetime' payload"):
+        reg.decode({"__lil_type__": "datetime", "v": "NOT_A_VALID_DATETIME"})
+
+    # Malformed uuid: invalid hex
+    with pytest.raises(DurableCodecError, match="Failed to hydrate tagged 'uuid' payload"):
+        reg.decode({"__lil_type__": "uuid", "v": "not-a-valid-uuid-string"})
+
+    # Malformed path: integer instead of string
+    with pytest.raises(DurableCodecError, match="Failed to hydrate tagged 'path' payload"):
+        reg.decode({"__lil_type__": "path", "v": 12345})
+
+
+def test_deep_nesting_depth_guard():
+    """Verify that excessively deep payload nesting fails closed with DurableCodecError."""
+    reg = DurableCodecRegistry()
+
+    # Create 300-level nested list
+    deep_list = [1]
+    for _ in range(300):
+        deep_list = [deep_list]
+
+    with pytest.raises(DurableCodecError, match="Maximum encoding depth"):
+        reg.encode(deep_list)
+
+    with pytest.raises(DurableCodecError, match="Maximum decoding depth"):
+        reg.decode(deep_list)

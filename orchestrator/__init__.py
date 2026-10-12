@@ -1,6 +1,6 @@
 """orchestrator — deterministic durability kernel and crash-resilient execution."""
 
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 
 from .codecs import (
     DEFAULT_CODEC_REGISTRY,

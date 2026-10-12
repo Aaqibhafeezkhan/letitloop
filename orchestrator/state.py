@@ -364,6 +364,25 @@ class State:
         if _event_hash(event) != event["event_hash"]:
             raise StateError("event hash mismatch")
 
+        # Timestamp validation: verify ISO-8601 formatting
+        ts_str = event.get("timestamp")
+        if not isinstance(ts_str, str):
+            raise StateError("event timestamp must be ISO-8601 string")
+        try:
+            event_dt = datetime.fromisoformat(ts_str)
+        except (ValueError, TypeError) as e:
+            raise StateError(f"event timestamp invalid ISO-8601: {e}") from e
+
+        # Pragmatist Guardrail: enforce sanity check on live appends only
+        # (reject timestamps >24h in the future to prevent clock-corruption poisoning while preserving historical replay)
+        if not replay:
+            now_dt = datetime.now(timezone.utc)
+            # Normalize naive / aware for comparison if needed
+            if event_dt.tzinfo is None:
+                event_dt = event_dt.replace(tzinfo=timezone.utc)
+            if (event_dt - now_dt).total_seconds() > 86400:
+                raise StateError(f"event timestamp far in the future: {ts_str}")
+
         event_type = event["event_type"]
         payload = event["payload"]
         if not isinstance(payload, dict):

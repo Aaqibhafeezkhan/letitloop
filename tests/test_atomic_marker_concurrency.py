@@ -82,3 +82,61 @@ def test_atomic_marker_multithread_mutual_exclusion():
 
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_atomic_marker_path_traversal_jailed():
+    """Verify that path traversal attempts in marker_id are strictly jailed within markers_dir."""
+    temp_dir = tempfile.mkdtemp(prefix="lil_marker_sec_")
+    markers_dir = os.path.join(temp_dir, "markers")
+    try:
+        # Malicious traversal attempt
+        with atomic_marker("../../escape_attempt", run_dir=temp_dir) as should_run:
+            assert should_run
+
+        # Outside directory must NOT contain escape_attempt
+        outside_file = os.path.join(temp_dir, "escape_attempt.committed")
+        assert not os.path.exists(outside_file)
+
+        # All files must remain strictly jailed inside markers_dir
+        assert os.path.exists(markers_dir)
+        files = os.listdir(markers_dir)
+        assert len(files) > 0
+        for f in files:
+            assert not f.startswith("..")
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_atomic_marker_distinct_identifiers_no_collision():
+    """Verify distinct identifiers with punctuation do not collide (SEC-PROTO-02)."""
+    temp_dir = tempfile.mkdtemp(prefix="lil_marker_col_")
+    try:
+        # stripe/charge vs stripe_charge vs stripe:charge
+        with atomic_marker("stripe/charge", run_dir=temp_dir) as run1:
+            assert run1
+
+        # Different operations must NOT be skipped due to regex collision
+        with atomic_marker("stripe_charge", run_dir=temp_dir) as run2:
+            assert run2
+
+        with atomic_marker("stripe:charge", run_dir=temp_dir) as run3:
+            assert run3
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_atomic_marker_windows_long_path():
+    """Verify long marker_id strings (>300 chars) do not crash with Windows MAX_PATH."""
+    temp_dir = tempfile.mkdtemp(prefix="lil_marker_long_")
+    long_id = "a" * 350
+    try:
+        with atomic_marker(long_id, run_dir=temp_dir) as should_run:
+            assert should_run
+
+        with atomic_marker(long_id, run_dir=temp_dir) as should_run_again:
+            assert not should_run_again
+
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)

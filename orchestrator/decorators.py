@@ -7,6 +7,7 @@ import contextlib
 import contextvars
 import dataclasses
 import functools
+import hashlib
 import json
 import os
 import re
@@ -194,47 +195,63 @@ def atomic_marker(marker_id: str, run_dir: Optional[str] = None):
                 f"atomic_marker('{marker_id}') called outside a @durable context without run_dir. "
                 "Wrap your function with @durable or pass run_dir explicitly. Set LETITLOOP_LENIENT=1 to allow non-durable fallback."
             )
-    active_dir = run_dir or (ctx.run_dir if ctx else ".durable_wal")
-    markers_dir = os.path.join(active_dir, "markers")
+    active_dir = os.path.abspath(run_dir or (ctx.run_dir if ctx else ".durable_wal"))
+    markers_dir = os.path.abspath(os.path.join(active_dir, "markers"))
     os.makedirs(markers_dir, exist_ok=True)
 
-    safe_marker_id = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", marker_id)
-    committed_marker = os.path.join(markers_dir, f"{safe_marker_id}.committed")
-    legacy_marker = os.path.join(markers_dir, f"{safe_marker_id}.marker")
-    legacy_orig_committed = os.path.join(markers_dir, f"{marker_id}.committed")
-    legacy_orig_marker = os.path.join(markers_dir, f"{marker_id}.marker")
+    # SEC-PROTO-01 & SEC-PROTO-02: Map marker_id to bounded SHA-256 digest
+    # Guarantees bounded filename (<48 chars), eliminates identifier collisions,
+    # and prevents Windows MAX_PATH (>260 chars) or invalid filesystem characters.
+    raw_bytes = marker_id.encode("utf-8", errors="replace")
+    marker_hash = hashlib.sha256(raw_bytes).hexdigest()
+    # Safe prefix slug (max 24 chars) + stable 32-char hex digest
+    slug = re.sub(r"[^a-zA-Z0-9_\-]", "_", marker_id)[:24].strip("._-") or "marker"
+    marker_key = f"{slug}-{marker_hash[:32]}"
 
-    lock_file = os.path.join(markers_dir, f"{safe_marker_id}.lock")
+    committed_marker = os.path.join(markers_dir, f"{marker_key}.committed")
+    lock_file = os.path.join(markers_dir, f"{marker_key}.lock")
     thread_lock = _get_marker_thread_lock(lock_file)
     file_lock = FileLock(lock_file, timeout_sec=30.0)
+
+    # Legacy compatibility paths (v0.7.1 and earlier) with strict directory jailing
+    legacy_lookups = []
+    legacy_regex_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", marker_id)
+    for cand in (
+        f"{legacy_regex_name}.committed",
+        f"{legacy_regex_name}.marker",
+        f"{marker_id}.committed",
+        f"{marker_id}.marker",
+    ):
+        try:
+            cand_path = os.path.abspath(os.path.join(markers_dir, cand))
+            # Strict jail guard: candidate MUST be within markers_dir (prevents traversal / path hijacking)
+            if os.path.commonpath([markers_dir, cand_path]) == markers_dir:
+                legacy_lookups.append(cand_path)
+        except (ValueError, OSError):
+            pass
 
     with thread_lock:
         with file_lock:
             # If already successfully committed in prior execution, skip side-effect
-            if (
-                os.path.isfile(committed_marker)
-                or os.path.isfile(legacy_marker)
-                or os.path.isfile(legacy_orig_committed)
-                or os.path.isfile(legacy_orig_marker)
-            ):
+            if os.path.isfile(committed_marker) or any(os.path.isfile(p) for p in legacy_lookups):
                 yield False
                 return
 
             pid = os.getpid()
-            pending_marker = os.path.join(markers_dir, f"{safe_marker_id}.pending.{pid}")
+            pending_marker = os.path.join(markers_dir, f"{marker_key}.pending.{pid}")
 
-            # Write pending marker
+            # Write pending marker (record active in-flight intent)
             try:
                 fd = os.open(pending_marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(json.dumps({"marker_id": marker_id, "pid": pid, "ts": time.time()}))
+                    json.dump({"marker_id": marker_id, "pid": pid, "ts": time.time()}, f)
             except FileExistsError:
                 pass
 
             try:
                 yield True
                 # Phase 2: Block succeeded without exception -> commit marker atomically
-                tmp_fd, tmp_path = tempfile.mkstemp(prefix=f".commit-{safe_marker_id}-", dir=markers_dir)
+                tmp_fd, tmp_path = tempfile.mkstemp(prefix=f".commit-{marker_key[:16]}-", dir=markers_dir)
                 try:
                     with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                         json.dump({"marker_id": marker_id, "pid": pid, "ts": time.time()}, f)

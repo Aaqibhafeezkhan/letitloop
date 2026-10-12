@@ -285,3 +285,49 @@ class TestSchemaForwardCompatibility:
         with pytest.raises(StateError) as exc_info:
             replay_wal(str(state_file))
         assert "WAL does not start with INIT (seq=1)" in str(exc_info.value)
+
+    def test_apply_event_timestamp_validation(self):
+        s = create_initial_state("ts-task")
+        # Invalid timestamp string
+        bad_event = {
+            "seq": 2,
+            "timestamp": "not-a-timestamp",
+            "event_type": "DATA_PATCH",
+            "task_id": "ts-task",
+            "prev_hash": s._hash_head,
+            "payload": {"patch": {"k": "v"}},
+            "event_hash": "dummy",
+        }
+        from orchestrator.state import _event_hash
+
+        bad_event["event_hash"] = _event_hash(bad_event)
+        with pytest.raises(StateError, match="event timestamp invalid ISO-8601"):
+            s._apply_event(bad_event, replay=False)
+
+        # Far-future timestamp on live append rejected
+        future_event = {
+            "seq": 2,
+            "timestamp": "2099-01-01T00:00:00+00:00",
+            "event_type": "DATA_PATCH",
+            "task_id": "ts-task",
+            "prev_hash": s._hash_head,
+            "payload": {"patch": {"k": "v"}},
+            "event_hash": "dummy",
+        }
+        future_event["event_hash"] = _event_hash(future_event)
+        with pytest.raises(StateError, match="event timestamp far in the future"):
+            s._apply_event(future_event, replay=False)
+
+        # But historical or past event in replay mode is preserved without breaking
+        replay_event = {
+            "seq": 2,
+            "timestamp": "2020-01-01T00:00:00+00:00",
+            "event_type": "DATA_PATCH",
+            "task_id": "ts-task",
+            "prev_hash": s._hash_head,
+            "payload": {"patch": {"k": "v"}},
+            "event_hash": "dummy",
+        }
+        replay_event["event_hash"] = _event_hash(replay_event)
+        s._apply_event(replay_event, replay=True)
+        assert s.data["k"] == "v"

@@ -3,6 +3,19 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-10-12
+
+### 🔒 Protocol Boundary Hardening, Split-Brain Elimination & Codec Cycle Safety
+- **Bounded SHA-256 Markers (`SEC-PROTO-01` & `SEC-PROTO-02`)**: Replaced regex identifier sanitization with canonical SHA-256 digest filenames (`m-{sha256[:32]}`). Eliminates identifier collisions (`stripe/charge` vs `stripe_charge`), path traversal attempts (`../../`), and Windows NTFS `MAX_PATH` (>260 char) crashes.
+- **Strict Directory Jailing**: Legacy marker compatibility lookups now strictly verify containment within `markers_dir` via `os.path.commonpath`, preventing path hijacking.
+- **Split-Brain Elimination in `FileLock.release()` (`SEC-PROTO-03`)**: Added CAS-style lock ownership token (`process_start_token` + PID) verification before unlinking lock files. Prevents stolen or replaced locks from being blindly deleted by slow contender processes.
+- **Codec Recursion & Cycle Protection**: Added in-flight visited object cycle detection and maximum recursion depth (256) guards to `DurableCodecRegistry.encode()`, failing closed with `DurableCodecError` instead of leaking raw unhandled `RecursionError`.
+- **Safe Hydration Exception Handling**: Wrapped tagged payload hydration in `DurableCodecRegistry.decode()` to catch malformed payload data (invalid tuple iterables, malformed datetime/uuid strings) and fail closed with `DurableCodecError`.
+- **Timestamp Sanity & Replay Preservation**: Added ISO-8601 parsing validation and clock-drift bounds on live appends, while maintaining clean backward compatibility for offline replay of historical WAL files.
+- **Durability Contract Boundary Transparency**: Formally clarified in documentation that `atomic_marker` guarantees serialized execution and durable local completion records; recommended upstream `Idempotency-Key` headers for remote non-idempotent HTTP API side-effects.
+
+---
+
 ## [0.7.1] - 2026-10-12
 
 ### 🛡️ Concurrency Mutex, O(N) WAL Compaction & Type Preservation

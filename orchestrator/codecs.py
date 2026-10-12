@@ -76,66 +76,98 @@ class DurableCodecRegistry:
         self._type_to_codec[cls] = codec_info
         self._tag_to_codec[type_tag] = codec_info
 
-    def encode(self, val: Any) -> Any:
+    def encode(self, val: Any, *, _visited: Optional[set] = None, _depth: int = 0) -> Any:
         """Recursively encode an object into a JSON-serializable structure with type tags."""
         # Fast path for primitives
         if type(val) in _PRIMITIVES:
             return val
 
+        if _depth > 256:
+            raise DurableCodecError("Maximum encoding depth (256) exceeded: object hierarchy too deep or recursive.")
+
+        if _visited is None:
+            _visited = set()
+
+        val_id = id(val)
+        if val_id in _visited:
+            raise DurableCodecError(f"Circular reference detected while serializing object of type '{type(val).__name__}'.")
+
         # Registered custom codec (exact type or subclass)
         for cls, codec in self._type_to_codec.items():
             if isinstance(val, cls):
-                return {
-                    "__lil_type__": codec["tag"],
-                    "v": codec["encode"](val),
-                }
+                try:
+                    return {
+                        "__lil_type__": codec["tag"],
+                        "v": codec["encode"](val),
+                    }
+                except Exception as e:
+                    raise DurableCodecError(f"Failed to encode '{codec['tag']}': {e}") from e
 
-        # Pydantic v2 / v1 models (fallback if not explicitly registered with decode_fn)
-        if hasattr(val, "model_dump") and callable(val.model_dump):
-            return self.encode(val.model_dump())
-        if hasattr(val, "dict") and callable(val.dict):
-            return self.encode(val.dict())
+        # Containers & complex objects require cycle tracking
+        _visited.add(val_id)
+        try:
+            # Pydantic v2 / v1 models (fallback if not explicitly registered with decode_fn)
+            if hasattr(val, "model_dump") and callable(val.model_dump):
+                return self.encode(val.model_dump(), _visited=_visited, _depth=_depth + 1)
+            if hasattr(val, "dict") and callable(val.dict):
+                return self.encode(val.dict(), _visited=_visited, _depth=_depth + 1)
 
-        # Dataclasses (fallback if not explicitly registered)
-        if dataclasses.is_dataclass(val) and not isinstance(val, type):
-            return self.encode(dataclasses.asdict(val))
+            # Dataclasses (fallback if not explicitly registered)
+            if dataclasses.is_dataclass(val) and not isinstance(val, type):
+                return self.encode(dataclasses.asdict(val), _visited=_visited, _depth=_depth + 1)
 
-        # Containers
-        if isinstance(val, dict):
-            return {str(k): self.encode(v) for k, v in val.items()}
-        if isinstance(val, (list, tuple)):
-            encoded_list = [self.encode(x) for x in val]
-            if isinstance(val, tuple):
-                return {"__lil_type__": "tuple", "v": encoded_list}
-            return encoded_list
+            # Containers
+            if isinstance(val, dict):
+                return {str(k): self.encode(v, _visited=_visited, _depth=_depth + 1) for k, v in val.items()}
+            if isinstance(val, (list, tuple)):
+                encoded_list = [self.encode(x, _visited=_visited, _depth=_depth + 1) for x in val]
+                if isinstance(val, tuple):
+                    return {"__lil_type__": "tuple", "v": encoded_list}
+                return encoded_list
+        finally:
+            _visited.remove(val_id)
 
         raise DurableCodecError(
             f"Unsupported type '{type(val).__name__}' cannot be serialized. "
             "Register a custom codec via register_codec() or return a supported primitive/model."
         )
 
-    def decode(self, val: Any) -> Any:
+    def decode(self, val: Any, *, _depth: int = 0) -> Any:
         """Recursively decode and hydrate tagged structures into their target Python types."""
         if type(val) in _PRIMITIVES:
             return val
+
+        if _depth > 256:
+            raise DurableCodecError("Maximum decoding depth (256) exceeded in payload.")
 
         if isinstance(val, dict):
             if "__lil_type__" in val and "v" in val:
                 tag = val["__lil_type__"]
                 raw_v = val["v"]
                 if tag == "tuple":
-                    return tuple(self.decode(x) for x in raw_v)
+                    if not isinstance(raw_v, (list, tuple)):
+                        raise DurableCodecError(f"Corrupted tuple payload: expected iterable, got {type(raw_v).__name__}")
+                    try:
+                        return tuple(self.decode(x, _depth=_depth + 1) for x in raw_v)
+                    except DurableCodecError:
+                        raise
+                    except Exception as e:
+                        raise DurableCodecError(f"Failed to hydrate tuple elements: {e}") from e
+
                 if tag in self._tag_to_codec:
                     codec = self._tag_to_codec[tag]
-                    # Note: decode function handles its own hydration
-                    return codec["decode"](raw_v)
-                # Unregistered tag: preserve as dict for forward compatibility
-                return {k: self.decode(v) for k, v in val.items()}
+                    try:
+                        return codec["decode"](raw_v)
+                    except Exception as e:
+                        raise DurableCodecError(f"Failed to hydrate tagged '{tag}' payload: {e}") from e
 
-            return {k: self.decode(v) for k, v in val.items()}
+                # Unregistered tag: preserve as dict for forward compatibility
+                return {k: self.decode(v, _depth=_depth + 1) for k, v in val.items()}
+
+            return {k: self.decode(v, _depth=_depth + 1) for k, v in val.items()}
 
         if isinstance(val, list):
-            return [self.decode(x) for x in val]
+            return [self.decode(x, _depth=_depth + 1) for x in val]
 
         return val
 

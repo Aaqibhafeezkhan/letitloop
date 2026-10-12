@@ -193,3 +193,30 @@ def test_filelock_does_not_steal_live_lock(tmp_path):
         assert os.path.exists(lock_path)
     finally:
         lock.release()
+
+
+def test_filelock_release_does_not_unlink_stolen_lock(tmp_path):
+    """FileLock.release() must NOT unlink a lock stolen/replaced by another process (SEC-PROTO-03)."""
+    lock_path = os.path.join(str(tmp_path), ".split_brain.lock")
+
+    lock1 = lk.FileLock(lock_path, timeout_sec=0.5, poll_sec=0.01)
+    lock1.acquire()
+    assert os.path.exists(lock_path)
+
+    # Simulate Process 2 replacing/stealing lock while Process 1 was slow
+    with open(lock_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "pid": 88888,
+                "hostname": lk.socket.gethostname(),
+                "process_start_token": "token-88888",
+            },
+            f,
+        )
+
+    # Process 1 tries to release(): must recognize it is no longer the owner and leave Process 2's lock intact
+    lock1.release()
+    assert os.path.exists(lock_path)
+    with open(lock_path, "r", encoding="utf-8") as f:
+        current_data = json.load(f)
+    assert current_data.get("pid") == 88888

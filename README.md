@@ -132,7 +132,10 @@ No background Go servers, no Redis queues, and no PostgreSQL cluster configurati
 Naive state serialization engines rewrite full JSON dictionaries on every step, leading to catastrophic $O(N^2)$ write amplification. LetItLoop v0.7.1 uses discrete delta subkey patching under `step_outputs`, slashing WAL disk usage by **168x** (from 83.2 MB down to 378 KB for 1,000 steps) and accelerating replay recovery by **17.6x**.
 
 ### 3. Concurrency-Safe 2-Tier Mutex (`atomic_marker`)
-Guards external non-idempotent operations (payment charges, Slack alerts, emails) with a two-tier mutex combining thread-level locks and cross-process `FileLock` with stale-PID auto-stealing. Commit publishing uses atomic tempfile replacement (`os.fsync` + atomic rename), completely preventing multi-worker race conditions.
+Guards external side-effects with a two-tier mutex combining process-local thread locks and cross-process `FileLock` with CAS ownership verification and bounded SHA-256 filenames (`m-{sha256[:32]}`). Commit publishing uses atomic tempfile replacement (`os.fsync` + atomic rename), completely preventing multi-worker race conditions.
+
+> [!IMPORTANT]
+> **Durability Contract Boundary**: `atomic_marker` guarantees **serialized execution and durable local completion records** across restarts. For external remote HTTP APIs (e.g. Stripe charges, webhooks), no client-side filesystem marker can prevent replay if a crash strikes between HTTP dispatch and marker publication. For non-idempotent remote calls, pass an upstream idempotency key derived from the task context: `idempotency_key=f"{run_id}:{marker_id}"`.
 
 ### 4. Safe Type Preservation (`DurableCodecRegistry`)
 Preserves native Python types (`datetime`, `uuid.UUID`, `pathlib.Path`, `tuple`, dataclasses, and Pydantic models) across execution and recovery. Replay yields identical hydrated types without dynamic code execution risks or serialization demotion.

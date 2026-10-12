@@ -48,6 +48,7 @@ class FileLock:
         self.poll_sec = poll_sec
         self.stale_steal = stale_steal
         self._acquired = False
+        self._owner_payload: Optional[dict] = None
 
     def _lock_file_is_stale(self) -> bool:
         """Return True if the lock file at self.path is stale (holder dead or aged)."""
@@ -82,18 +83,20 @@ class FileLock:
     def acquire(self) -> None:
         deadline = time.monotonic() + self.timeout_sec
         retries = 0
+        pid = os.getpid()
+        token = _process_start_token(pid)
         while True:
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                payload = {
+                    "pid": pid,
+                    "hostname": socket.gethostname(),
+                    "process_start_token": token,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(
-                        {
-                            "pid": os.getpid(),
-                            "hostname": socket.gethostname(),
-                            "created_at": datetime.now(timezone.utc).isoformat(),
-                        },
-                        f,
-                    )
+                    json.dump(payload, f)
+                self._owner_payload = payload
                 self._acquired = True
                 return
             except (FileExistsError, PermissionError):
@@ -120,6 +123,24 @@ class FileLock:
     def release(self) -> None:
         if not self._acquired:
             return
+
+        # Safe release: verify ownership token to prevent split-brain unlinking of stolen/replaced locks
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                current_lock = json.load(f)
+            if isinstance(current_lock, dict) and self._owner_payload:
+                curr_pid = current_lock.get("pid")
+                curr_tok = current_lock.get("process_start_token")
+                expected_pid = self._owner_payload.get("pid")
+                expected_tok = self._owner_payload.get("process_start_token")
+                if curr_pid != expected_pid or (expected_tok and curr_tok != expected_tok):
+                    # Stolen or replaced by competitor — do not unlink someone else's active lock!
+                    self._acquired = False
+                    self._owner_payload = None
+                    return
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
         # On Windows NTFS, transient read handles from race checks can cause WinError 32; retry briefly
         for _ in range(50):
             try:
@@ -130,6 +151,7 @@ class FileLock:
             except OSError:
                 time.sleep(0.002)
         self._acquired = False
+        self._owner_payload = None
 
     def __enter__(self) -> "FileLock":
         self.acquire()
