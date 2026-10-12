@@ -123,16 +123,19 @@ app = workflow.compile(checkpointer=LetItLoopCheckpointSaver())
 
 See [docs/adapters.md](docs/adapters.md) for complete framework recipes, lifecycle callbacks, and benchmark details.
 
-## 💎 The 3 Architectural Moats
+## 💎 The 4 Architectural Moats
 
 ### 1. Zero-Daemon Local Durability (Zero Infrastructure)
-No background Go servers, no Redis queues, and no PostgreSQL cluster configuration. LetItLoop embeds a single-file Write-Ahead Log (`LILWAL02`) that logs step outputs atomically. If your script dies from `SIGKILL (137)`, OOM, or spot eviction, running the script again instantly fast-forwards to the exact interrupted step in **~14ms**.
+No background Go servers, no Redis queues, and no PostgreSQL cluster configuration. LetItLoop embeds a single-file Write-Ahead Log (`LILWAL02`) that logs step outputs atomically. If your script dies from `SIGKILL (137)`, OOM, or spot eviction, running the script again instantly fast-forwards to the exact interrupted step in **72 $\mu$s/step**.
 
-### 2. Zero Write Amplification & Fast-Forward Replay
-Unlike naive state serialization engines that rewrite full megabyte JSON snapshots on every single step ($O(N^2 \cdot S)$ write amplification), LetItLoop appends compact CRC32-framed delta records to an in-process WAL. Hot steps execute at native CPU speed with decoupled periodic snapshotting, allowing resumed executions to replay hundreds of steps in under **15ms**.
+### 2. O(N) Discrete Delta Writes & 168x WAL Compaction
+Naive state serialization engines rewrite full JSON dictionaries on every step, leading to catastrophic $O(N^2)$ write amplification. LetItLoop v0.7.1 uses discrete delta subkey patching under `step_outputs`, slashing WAL disk usage by **168x** (from 83.2 MB down to 378 KB for 1,000 steps) and accelerating replay recovery by **17.6x**.
 
-### 3. Proof-Carrying CI Gate (`letitloop-action`)
-LetItLoop generates signed HMAC-SHA256 receipts recording execution invariants and test outputs. Drop [`letitloop-action@v2`](https://github.com/sdageltc/letitloop-action) into GitHub Actions to block AI pull requests from hallucinating passing test outputs or altering protected function signatures.
+### 3. Concurrency-Safe 2-Tier Mutex (`atomic_marker`)
+Guards external non-idempotent operations (payment charges, Slack alerts, emails) with a two-tier mutex combining thread-level locks and cross-process `FileLock` with stale-PID auto-stealing. Commit publishing uses atomic tempfile replacement (`os.fsync` + atomic rename), completely preventing multi-worker race conditions.
+
+### 4. Safe Type Preservation (`DurableCodecRegistry`)
+Preserves native Python types (`datetime`, `uuid.UUID`, `pathlib.Path`, `tuple`, dataclasses, and Pydantic models) across execution and recovery. Replay yields identical hydrated types without dynamic code execution risks or serialization demotion.
 
 ---
 

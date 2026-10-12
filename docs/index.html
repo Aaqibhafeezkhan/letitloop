@@ -590,7 +590,7 @@
       <a href="https://github.com/sdageltc/letitloop" class="nav-brand">
         <img src="assets/logo.png" alt="LetItLoop" />
         LetItLoop
-        <span class="version-badge">v0.7.0</span>
+        <span class="version-badge">v0.7.1</span>
       </a>
       <nav class="nav-links">
         <a href="https://sdageltc.github.io/letitloop/" class="nav-link active">Runtime Engine</a>
@@ -640,20 +640,20 @@
     <!-- Verified Metrics Ribbon -->
     <div class="metric-ribbon">
       <div class="metric-cell">
-        <div class="metric-num">158</div>
+        <div class="metric-num">165</div>
         <div class="metric-lbl">Tests Passing (100% Green)</div>
       </div>
       <div class="metric-cell">
-        <div class="metric-num">10.8 ms</div>
-        <div class="metric-lbl">Median WAL Replay Latency</div>
+        <div class="metric-num">72 µs</div>
+        <div class="metric-lbl">Per-Step Replay Latency</div>
       </div>
       <div class="metric-cell">
         <div class="metric-num">0</div>
         <div class="metric-lbl">Background Daemons Needed</div>
       </div>
       <div class="metric-cell">
-        <div class="metric-num">98%</div>
-        <div class="metric-lbl">Write Amplification Decoupled</div>
+        <div class="metric-num">168x</div>
+        <div class="metric-lbl">WAL Disk Compaction (O(N))</div>
       </div>
     </div>
 
@@ -703,9 +703,9 @@
       </div>
 
       <div class="bento-box">
-        <div class="bento-tag">02 / 2-PHASE MARKERS</div>
+        <div class="bento-tag">02 / 2-PHASE MUTEX</div>
         <h3 class="bento-h">Side-Effect Deduplication</h3>
-        <p class="bento-p">Two-phase step markers (<code>.pending.&lt;pid&gt;</code> &rarr; <code>.committed</code>) guarantee external database writes, payment triggers, and web actions never duplicate after crashes.</p>
+        <p class="bento-p">Two-tier mutex (thread lock + cross-process <code>FileLock</code> with atomic tempfile replacement) guarantees external database writes, payment triggers, and web actions never duplicate across concurrent workers or crashes.</p>
       </div>
 
       <div class="bento-box">
@@ -729,7 +729,7 @@
       <div class="bento-box">
         <div class="bento-tag">06 / CI/CD</div>
         <h3 class="bento-h">Multi-OS Matrix Suite</h3>
-        <p class="bento-p">158 automated unit and integration tests across Ubuntu, macOS, and Windows runners (Python 3.11 & 3.12) with 100% green status.</p>
+        <p class="bento-p">165 automated unit and integration tests across Ubuntu, macOS, and Windows runners (Python 3.11 & 3.12) with 100% green status.</p>
       </div>
     </div>
 

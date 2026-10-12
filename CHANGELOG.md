@@ -3,6 +3,16 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-10-12
+
+### 🛡️ Concurrency Mutex, O(N) WAL Compaction & Type Preservation
+- **2-Tier `atomic_marker` Mutex**: Upgraded atomic step markers with process-local `threading.Lock` and cross-process `FileLock` mutual exclusion, moving `.committed` checks inside the acquired lock and publishing markers via atomic tempfile `os.replace` (`os.fsync` + atomic rename) to eliminate multi-process and multi-thread race conditions.
+- **Elimination of $O(N^2)$ Write Amplification**: Replaced full-dictionary serialization in `step()` and `async_step()` with discrete subkey delta patching under `step_outputs`. Compresses WAL size by 168x (from 83.2 MB down to 378 KB for 1,000 steps) and accelerates replay recovery by 17.6x (down to 72.39 $\mu$s/step).
+- **Safe Type Preservation (`DurableCodecRegistry`)**: Introduced safe, extensible codec registry for standard Python objects (`datetime`, `uuid.UUID`, `pathlib.Path`, `tuple`, dataclasses, and Pydantic models). Enforces zero dynamic import execution and fails closed with `DurableSerializationError` on unhandled types.
+- **Conformance Transparency (DCP-2.0)**: Added explicit `adapter_kind` (`native_kernel` vs `simulated_archetype`) and `framework_executed` flags to DCP-2.0 conformance receipts to distinguish native micro-kernel executions from simulated baseline archetypes.
+
+---
+
 ## [0.7.0] - 2026-10-07
 
 ### ⚡ The SQLite of Durable Execution (Micro-Kernel Architecture)
