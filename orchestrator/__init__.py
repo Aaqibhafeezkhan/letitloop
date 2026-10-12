@@ -2,6 +2,13 @@
 
 __version__ = "0.7.0"
 
+from .codecs import (
+    DEFAULT_CODEC_REGISTRY,
+    DurableCodecError,
+    DurableCodecRegistry,
+    decode_step_result,
+    encode_step_result,
+)
 from .decorators import (
     DurableSerializationError,
     async_step,
@@ -36,6 +43,11 @@ __all__ = [
     "LivenessSupervisor",
     "CircuitBreakerError",
     "DurableSerializationError",
+    "DurableCodecError",
+    "DurableCodecRegistry",
+    "DEFAULT_CODEC_REGISTRY",
+    "encode_step_result",
+    "decode_step_result",
     "State",
     "StateError",
     "IllegalTransitionError",

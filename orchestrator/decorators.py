@@ -9,17 +9,36 @@ import dataclasses
 import functools
 import json
 import os
+import re
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from .lock import acquire_lock, release_lock
+from .codecs import (
+    DurableCodecError,
+    decode_step_result,
+    encode_step_result,
+)
+from .lock import FileLock, acquire_lock, release_lock
 from .state import State, create_initial_state, load_state, save_state
 
 
-class DurableSerializationError(TypeError):
+class DurableSerializationError(DurableCodecError):
     """Raised when a durable step returns an object that cannot be serialized to JSON/WAL."""
+
+
+# Marker synchronization locks for process-local thread safety
+_MARKER_GLOBAL_LOCK = threading.Lock()
+_MARKER_THREAD_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _get_marker_thread_lock(lock_key: str) -> threading.Lock:
+    with _MARKER_GLOBAL_LOCK:
+        if lock_key not in _MARKER_THREAD_LOCKS:
+            _MARKER_THREAD_LOCKS[lock_key] = threading.Lock()
+        return _MARKER_THREAD_LOCKS[lock_key]
 
 
 # Thread-local active context: concurrent @durable workflows in one process
@@ -64,9 +83,8 @@ def _to_json_serializable(val: Any) -> Any:
 def _serialize_step_output(step_id: str, result: Any) -> Any:
     """Validate and serialize step output. Fail fast with DurableSerializationError."""
     try:
-        raw_json = json.dumps(result, default=_to_json_serializable, ensure_ascii=False)
-        return json.loads(raw_json)
-    except (TypeError, ValueError) as exc:
+        return encode_step_result(result)
+    except Exception as exc:
         raise DurableSerializationError(
             f"Step '{step_id}' returned non-serializable object: {exc}. "
             "Ensure return value is a dict, dataclass, Pydantic model, or JSON primitive."
@@ -89,12 +107,16 @@ class DurableContext:
         wal_file = os.path.join(self.run_dir, "state.wal.jsonl")
         if os.path.isfile(self.state_file) or os.path.isfile(wal_file):
             self.state = load_state(self.state_file, journal_dir=self.run_dir)
-            for k, v in self.state.data.items():
+            step_outputs = self.state.data.get("step_outputs", {})
+            if isinstance(step_outputs, dict):
+                for sub_k, sub_v in step_outputs.items():
+                    self.completed_steps[sub_k] = decode_step_result(sub_v)
+            for k, v in list(self.state.data.items()):
                 if k.startswith("step_output_"):
                     step_id = k[len("step_output_") :]
-                    self.completed_steps[step_id] = v
-                elif k == "step_outputs" and isinstance(v, dict):
-                    self.completed_steps.update(v)
+                    decoded = decode_step_result(v)
+                    self.completed_steps[step_id] = decoded
+                    self.state.data.setdefault("step_outputs", {})[step_id] = decoded
         else:
             self.state = create_initial_state(self.goal_id, journal_dir=self.run_dir)
             save_state(self.state, self.state_file)
@@ -131,12 +153,16 @@ class DurableAsyncContext:
         wal_file = os.path.join(self.run_dir, "state.wal.jsonl")
         if os.path.isfile(self.state_file) or os.path.isfile(wal_file):
             self.state = load_state(self.state_file, journal_dir=self.run_dir)
-            for k, v in self.state.data.items():
+            step_outputs = self.state.data.get("step_outputs", {})
+            if isinstance(step_outputs, dict):
+                for sub_k, sub_v in step_outputs.items():
+                    self.completed_steps[sub_k] = decode_step_result(sub_v)
+            for k, v in list(self.state.data.items()):
                 if k.startswith("step_output_"):
                     step_id = k[len("step_output_") :]
-                    self.completed_steps[step_id] = v
-                elif k == "step_outputs" and isinstance(v, dict):
-                    self.completed_steps.update(v)
+                    decoded = decode_step_result(v)
+                    self.completed_steps[step_id] = decoded
+                    self.state.data.setdefault("step_outputs", {})[step_id] = decoded
         else:
             self.state = create_initial_state(self.goal_id, journal_dir=self.run_dir)
             save_state(self.state, self.state_file)
@@ -154,9 +180,12 @@ class DurableAsyncContext:
 def atomic_marker(marker_id: str, run_dir: Optional[str] = None):
     """Context manager guarding non-idempotent external side effects with two-phase commit.
 
-    Phase 1 (enter): Check if '<marker_id>.committed' exists. If so, yield False (skip).
-                     Otherwise, write '<marker_id>.pending.<pid>'.
-    Phase 2 (exit): Atomically rename '<marker_id>.pending.<pid>' to '<marker_id>.committed'.
+    Uses a two-tier mutex (process-local thread lock + cross-process FileLock) to ensure
+    strict mutual exclusion across concurrent threads and processes.
+
+    Phase 1 (enter): Acquire 2-tier lock. Check if '<safe_id>.committed' exists. If so, yield False (skip).
+                     Otherwise, write '<safe_id>.pending.<pid>' and yield True.
+    Phase 2 (exit): Atomically commit marker via tempfile + os.replace, then release lock.
     """
     ctx = _get_active_context() or _get_async_context()
     if ctx is None and run_dir is None:
@@ -169,39 +198,57 @@ def atomic_marker(marker_id: str, run_dir: Optional[str] = None):
     markers_dir = os.path.join(active_dir, "markers")
     os.makedirs(markers_dir, exist_ok=True)
 
-    committed_marker = os.path.join(markers_dir, f"{marker_id}.committed")
-    legacy_marker = os.path.join(markers_dir, f"{marker_id}.marker")
+    safe_marker_id = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", marker_id)
+    committed_marker = os.path.join(markers_dir, f"{safe_marker_id}.committed")
+    legacy_marker = os.path.join(markers_dir, f"{safe_marker_id}.marker")
+    legacy_orig_committed = os.path.join(markers_dir, f"{marker_id}.committed")
+    legacy_orig_marker = os.path.join(markers_dir, f"{marker_id}.marker")
 
-    # If already successfully committed in prior execution, skip side-effect
-    if os.path.isfile(committed_marker) or os.path.isfile(legacy_marker):
-        yield False
-        return
+    lock_file = os.path.join(markers_dir, f"{safe_marker_id}.lock")
+    thread_lock = _get_marker_thread_lock(lock_file)
+    file_lock = FileLock(lock_file, timeout_sec=30.0)
 
-    pid = os.getpid()
-    pending_marker = os.path.join(markers_dir, f"{marker_id}.pending.{pid}")
+    with thread_lock:
+        with file_lock:
+            # If already successfully committed in prior execution, skip side-effect
+            if (
+                os.path.isfile(committed_marker)
+                or os.path.isfile(legacy_marker)
+                or os.path.isfile(legacy_orig_committed)
+                or os.path.isfile(legacy_orig_marker)
+            ):
+                yield False
+                return
 
-    # Write pending marker
-    try:
-        fd = os.open(pending_marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"marker_id": marker_id, "pid": pid, "ts": time.time()}))
-    except FileExistsError:
-        pass
+            pid = os.getpid()
+            pending_marker = os.path.join(markers_dir, f"{safe_marker_id}.pending.{pid}")
 
-    try:
-        yield True
-        # Phase 2: Block succeeded without exception -> commit marker atomically
-        try:
-            os.replace(pending_marker, committed_marker)
-        except OSError:
-            if os.path.exists(pending_marker):
-                os.rename(pending_marker, committed_marker)
-    except Exception:
-        # Block raised exception -> cleanup pending marker so it can be retried
-        if os.path.exists(pending_marker):
-            with contextlib.suppress(OSError):
-                os.remove(pending_marker)
-        raise
+            # Write pending marker
+            try:
+                fd = os.open(pending_marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps({"marker_id": marker_id, "pid": pid, "ts": time.time()}))
+            except FileExistsError:
+                pass
+
+            try:
+                yield True
+                # Phase 2: Block succeeded without exception -> commit marker atomically
+                tmp_fd, tmp_path = tempfile.mkstemp(prefix=f".commit-{safe_marker_id}-", dir=markers_dir)
+                try:
+                    with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                        json.dump({"marker_id": marker_id, "pid": pid, "ts": time.time()}, f)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp_path, committed_marker)
+                finally:
+                    if os.path.exists(tmp_path):
+                        with contextlib.suppress(OSError):
+                            os.remove(tmp_path)
+            finally:
+                if os.path.exists(pending_marker):
+                    with contextlib.suppress(OSError):
+                        os.remove(pending_marker)
 
 
 def step(step_id: str, fn: Callable, *args: Any, **kwargs: Any) -> Any:
@@ -227,24 +274,21 @@ def step(step_id: str, fn: Callable, *args: Any, **kwargs: Any) -> Any:
     # 2. Execute in-flight step
     result = fn(*args, **kwargs)
 
-    # 3. Verify and serialize return value (supports Pydantic, dataclasses, primitives)
+    # 3. Verify and serialize return value (safe codecs, type tags, primitives)
     serialized_result = _serialize_step_output(step_id, result)
 
     # 4. Record to state & WAL (WAL append is atomic and fsync'd)
-    current_outputs = dict(ctx.state.data.get("step_outputs", {}))
-    current_outputs[step_id] = serialized_result
-    ctx.state.patch_data(
-        {
-            "step_outputs": current_outputs,
-        }
-    )
+    # Patch discrete delta sub-key under step_outputs to prevent O(N^2) WAL write amplification
+    ctx.state.patch_data({"step_outputs": {step_id: serialized_result}})
+
     # Decouple expensive snapshotting from discrete step execution (save periodically or on exit)
     ctx.step_count = getattr(ctx, "step_count", 0) + 1
     if ctx.step_count % 50 == 0:
         save_state(ctx.state, ctx.state_file)
 
-    ctx.completed_steps[step_id] = serialized_result
-    return serialized_result
+    decoded_result = decode_step_result(serialized_result)
+    ctx.completed_steps[step_id] = decoded_result
+    return decoded_result
 
 
 def durable(goal_id: Optional[str] = None, wal_dir: str = ".durable_wal"):
@@ -298,18 +342,13 @@ async def async_step(step_id: str, async_fn: Callable, *args: Any, **kwargs: Any
             return ctx.completed_steps[step_id]
         result = await async_fn(*args, **kwargs)
         serialized = _serialize_step_output(step_id, result)
-        current_outputs = dict(ctx.state.data.get("step_outputs", {}))
-        current_outputs[step_id] = serialized
-        ctx.state.patch_data(
-            {
-                "step_outputs": current_outputs,
-            }
-        )
+        ctx.state.patch_data({"step_outputs": {step_id: serialized}})
         ctx.step_count = getattr(ctx, "step_count", 0) + 1
         if ctx.step_count % 50 == 0:
             save_state(ctx.state, ctx.state_file)
-        ctx.completed_steps[step_id] = serialized
-        return serialized
+        decoded = decode_step_result(serialized)
+        ctx.completed_steps[step_id] = decoded
+        return decoded
 
 
 def durable_async(goal_id: Optional[str] = None, wal_dir: str = ".durable_wal"):

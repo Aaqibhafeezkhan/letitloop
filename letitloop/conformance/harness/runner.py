@@ -397,6 +397,8 @@ class DurabilityBenchmarkRunner:
             "kill_window": window,
             "framework": score.framework,
             "archetype_label": ARCHETYPE_LABELS.get(score.framework, score.framework),
+            "adapter_kind": "native_kernel" if score.framework == "letitloop" else "simulated_archetype",
+            "framework_executed": score.framework == "letitloop",
             "T_resume_ms": t_resume_ms,
             "W_token_pct": w_token,
             "C_fail": c_fail,

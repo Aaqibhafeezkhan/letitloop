@@ -441,6 +441,16 @@ class State:
                 for k, v in patch.items():
                     if v is _DELETE_SENTINEL:
                         self.data.pop(k, None)
+                    elif k == "step_outputs" and isinstance(v, dict):
+                        target = self.data.setdefault("step_outputs", {})
+                        if isinstance(target, dict):
+                            for sub_k, sub_v in v.items():
+                                if sub_v is _DELETE_SENTINEL:
+                                    target.pop(sub_k, None)
+                                else:
+                                    target[sub_k] = sub_v if replay else copy.deepcopy(sub_v)
+                        else:
+                            self.data[k] = v if replay else copy.deepcopy(v)
                     else:
                         self.data[k] = v if replay else copy.deepcopy(v)
             elif event_type == "FORCE_COMPLETE":
