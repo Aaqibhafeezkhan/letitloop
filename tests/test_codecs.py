@@ -111,6 +111,7 @@ def test_durable_workflow_type_preservation():
     p = Path("records/file.txt")
 
     try:
+
         @durable(goal_id="type_preservation_test", wal_dir=temp_dir)
         def my_workflow():
             val1 = step("generate_uuid", lambda: u)
@@ -142,6 +143,7 @@ def test_durable_workflow_type_preservation():
 
 def test_unsupported_type_fail_closed():
     """Verify that unsupported objects fail closed with DurableCodecError."""
+
     class CustomNonSerializable:
         pass
 

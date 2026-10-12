@@ -34,10 +34,7 @@ def test_atomic_marker_multiprocess_mutual_exclusion():
         num_workers = 8
         ctx = multiprocessing.get_context("spawn")
         with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as executor:
-            futures = [
-                executor.submit(_worker_process, temp_dir, marker_id, counter_file)
-                for _ in range(num_workers)
-            ]
+            futures = [executor.submit(_worker_process, temp_dir, marker_id, counter_file) for _ in range(num_workers)]
             results = [f.result(timeout=15.0) for f in futures]
 
         # Exactly 1 process must have returned True
